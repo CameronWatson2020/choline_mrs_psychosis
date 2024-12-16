@@ -16,18 +16,14 @@ library(writexl)
 library(ggplot2)
 library(grid)  
 
-setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls/")
+setwd("~/your/path/")
 
 ```
 
 ```{r}
 
 # Use this xls for all results, including component prefrontal regions 
-# df <- read_excel("casecont_overall_psychosis.xls")  - pre Jack with Study IDs
-df <- read_excel("casecont_overall_psychosis_studyID.xls")  
-
-# Use this xls forcombing prefrontalvalues- no longer using
-# df <- read_excel("casecont_overall_psychosis_pfc.xls") 
+df <- read_excel("your.xls")  
 
 # Cleaning data -----
 
@@ -378,7 +374,6 @@ region_order <- c("dlPFC", "mPFC", "Other frontal lobe", "ACC", "PCC", "Temporal
                   "Global grey matter", "Global white matter", "Frontal white matter", "Corpus callosum", "Centrum semiovale", 
                   "Cerebellum", "Striatum", "Thalamus", "Hippocampus")
 
-# Then reverse the order (ggplot puts them the wrong way weirdly)
 region_order <- rev(region_order)
 
 # Ensure brain regions are factors to maintain consistent ordering
