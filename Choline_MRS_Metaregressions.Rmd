@@ -1,6 +1,6 @@
 ---
 title: "Choline MRS Metaregressions"
-author: "CW"
+author: "Dr Cameron Watson"
 date: "2024-10-30"
 output: html_document
 ---
@@ -15,7 +15,7 @@ library(writexl)
 library(ggplot2)
 library(grid)  
 
-setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls")
+setwd("~/your/path")
 
 ```
 
@@ -24,9 +24,6 @@ setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_x
 
 # Use this xls for when generating values for all brain regions 
 df <- read_excel("casecont_overall_psychosis.xls")  
-
-# Use this xls for prefrontal values - not doing currently 
-# df <- read_excel("casecont_overall_psychosis_pfc.xls") 
 
 # Cleaning the data -----
 
@@ -108,9 +105,6 @@ merged_df <- merged_df %>%
     )
   )
 
-# only if you want to do combined PFC - not currently doing 
-# merged_df <- merged_df %>% mutate(region = case_when(region %in% c("dlPFC", "mPFC", "Other frontal lobe") ~ "Prefrontal", TRUE ~ region))
-
 ```
 
 ```{r}
@@ -131,7 +125,7 @@ merged_df <- merged_df %>%
     male_percent = `male_percent`
   )
 
-# List our regression variables where we need to change NR to NA - need to include magnet strength as none missing
+# List our regression variables where we need to change NR to NA 
 regression_vars <- c("fwhm_median", "snr_median_value", "age_mean", "medfree_percent", "mednaive_percent", "male_percent")
 merged_df <- merged_df %>%
   mutate(across(all_of(regression_vars), ~na_if(., "NR")))
