@@ -10,7 +10,7 @@ install.packages("RColorBrewer")
 install.packages("writexl")
 
 ```{r}
-setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls")
+setwd("~/your/path/")
 
 library(tidyverse) 
 library(metafor) 
@@ -26,11 +26,7 @@ library(writexl)
 # skip this section and just load the merged.xlsx in the next section if you have it
 
 # --------
-# df <- read_excel("established_psychosis.xls") old pre Jack's study IDs
-df <- read_excel("established_psychosis_studyid.xls") 
-
-# Load data for PFC combined estimates 
-# df <- read_excel("master_xls/established_psychosis_pfc.xls") 
+df <- read_excel("your.xls") 
 
 # Cleaning data -----
 
