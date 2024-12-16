@@ -1,0 +1,800 @@
+---
+title: "Choline MRS Metaregressions"
+author: "CW"
+date: "2024-10-30"
+output: html_document
+---
+
+```{r}
+
+library(tidyverse)  
+library(metafor) 
+library(readxl)
+library(RColorBrewer)
+library(writexl)
+library(ggplot2)
+library(grid)  
+
+setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls")
+
+```
+
+```{r}
+# ----- Load and clean data  
+
+# Use this xls for when generating values for all brain regions 
+df <- read_excel("casecont_overall_psychosis.xls")  
+
+# Use this xls for prefrontal values - not doing currently 
+# df <- read_excel("casecont_overall_psychosis_pfc.xls") 
+
+# Cleaning the data -----
+
+# Convert cols to numeric type
+cols_to_numeric <- c('metabolite mean (bilateral)', 
+                     'sd (bilateral)',
+                     'metabolite mean (right)', 
+                     'sd (right)', 
+                     'metabolite mean (left)', 
+                     'sd (left)', 
+                     'sample_size')
+
+merged_df <- df %>% 
+  mutate(across(all_of(cols_to_numeric), ~as.numeric(as.character(.)))) 
+
+# Convert all metabolites to 'Choline'
+metab <- c('Choline', 'Cho + PCh', 'Cho/Cr', 'GPC + PCh', 'GPC + PCh/Cr', 'Cho/Water')
+
+merged_df <- merged_df %>% mutate(metabolite = case_when( metabolite %in% c('Cho + PCh', 
+                                                                            'Cho/Cr', 
+                                                                            'GPC + PCh', 
+                                                                            'GPC + PCh/Cr',
+                                                                            'Cho/cr', 
+                                                                            'Cho/cre',
+                                                                            'Cho + PCh',
+                                                                            'Cho/Water',
+                                                                            'Choline/Cr') ~ 'Choline', TRUE ~ metabolite ))
+
+# Combine metabolites all to one column (creating bilateral from right and left)
+merged_df <- merged_df %>% mutate(
+  `metabolite mean (bilateral)` = ifelse(
+    is.na(`metabolite mean (bilateral)`) & !is.na(`metabolite mean (right)`) & !is.na(`metabolite mean (left)`),
+    ((`metabolite mean (right)` * `sample_size` + `metabolite mean (left)` * `sample_size`) / 
+       (2 * `sample_size`)),
+    `metabolite mean (bilateral)`
+  ))
+
+# when only left
+merged_df <- merged_df %>% mutate(`metabolite mean (bilateral)` =
+                                    ifelse(is.na(`metabolite mean (bilateral)`) &
+                                             is.na(`metabolite mean (right)`) &
+                                             !is.na(`metabolite mean (left)`),`metabolite mean (left)`,`metabolite mean (bilateral)`))
+
+# when only right
+merged_df <- merged_df %>% mutate(`metabolite mean (bilateral)` =
+                                    ifelse(is.na(`metabolite mean (bilateral)`) &
+                                             !is.na(`metabolite mean (right)`) &
+                                             is.na(`metabolite mean (left)`),`metabolite mean (right)`,`metabolite mean (bilateral)`))
+
+# remove columns for R and L
+merged_df <- merged_df %>% select(-`metabolite mean (right)`,
+                                  -`metabolite mean (left)`)
+
+# standard deviation calculations
+merged_df <- merged_df %>% mutate( `sd (bilateral)` = case_when(
+  is.na(`sd (bilateral)`) & is.na(`sd (right)`) & !is.na(`sd (left)`) ~
+    `sd (left)`, is.na(`sd (bilateral)`) & is.na(`sd (left)`) &
+    !is.na(`sd (right)`) ~ `sd (right)`, TRUE ~ `sd (bilateral)` ) ) %>%
+  mutate( `sd (bilateral)` = ifelse(is.na(`sd (bilateral)`) &
+                                      !is.na(`sd (right)`) & !is.na(`sd (left)`), sqrt((1/4) *
+                                       `sd (right)`^2 + (1/4) * `sd (left)`^2 + (1/2) * 0.8 * `sd (right)` * `sd (left)`), `sd (bilateral)` ))
+
+# remove columns for R and L
+merged_df <- merged_df %>% select(-`sd (right)`,
+                                  -`sd (left)`)
+
+# Correct variations in brain region names and diagnosis
+merged_df <- merged_df %>%
+  mutate(
+    region = case_when(
+      region %in% c("Frontal white matter", "frontal white matter") ~ "Frontal white matter",
+      region %in% c("White matter (multiple locations)") ~ "Global white matter",
+      region %in% c("Grey matter (multiple locations)") ~ "Global grey matter",
+      TRUE ~ region
+    ),
+    diagnosis = case_when(
+      diagnosis %in% c("FEP", "Schizophrenia", "Unspecified psychosis", "UHR/CHR", "TRS") ~ "Psychosis",
+      TRUE ~ diagnosis
+    )
+  )
+
+# only if you want to do combined PFC - not currently doing 
+# merged_df <- merged_df %>% mutate(region = case_when(region %in% c("dlPFC", "mPFC", "Other frontal lobe") ~ "Prefrontal", TRUE ~ region))
+
+```
+
+```{r}
+
+# Cleaning before Metaregressions 
+
+# formatting variables  
+
+# Rename columns to remove spaces and special characters
+merged_df <- merged_df %>%
+  rename(
+    fwhm_median = `fwhm (median)`,
+    snr_median_value = `snr (median value)`,
+    magnet_strength = `magnet_strength`,
+    age_mean = `age (mean)`,
+    medfree_percent = `medfree_percent`,
+    mednaive_percent = `mednaive_percent`,
+    male_percent = `male_percent`
+  )
+
+# List our regression variables where we need to change NR to NA - need to include magnet strength as none missing
+regression_vars <- c("fwhm_median", "snr_median_value", "age_mean", "medfree_percent", "mednaive_percent", "male_percent")
+merged_df <- merged_df %>%
+  mutate(across(all_of(regression_vars), ~na_if(., "NR")))
+
+# Convert all our columns to numeric 
+regression_vars <- c("fwhm_median", "snr_median_value", "magnet_strength", "age_mean", "medfree_percent", "mednaive_percent", "male_percent")
+merged_df <- merged_df %>%
+  mutate(across(all_of(regression_vars), as.numeric))
+
+# Calculate missingness for each variable
+calculate_missingness <- function(df, vars) {
+  sapply(vars, function(var) {
+    sum(is.na(df[[var]])) / nrow(df) * 100
+  })
+}
+
+missingness <- calculate_missingness(merged_df, regression_vars)
+print(missingness)
+
+```
+
+```{r}
+
+# 1. Magnet strength ------
+
+covariates <- c("magnet_strength")
+
+# Filter out rows with missing values in the selected covariate
+filtered_df <- merged_df %>%
+  filter(!is.na(magnet_strength))
+
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),          
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           all_of(covariates)) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()  
+  
+  # Ensure there are at least 5 studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Run meta-regression  
+    meta_result <- rma(yi, vi, 
+                       mods = ~ magnet_strength,
+                       data = current_df_smd)
+    
+    # Store the results
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,
+      yi = meta_result$beta[2],   
+      ci.lb = meta_result$ci.lb[2],   
+      ci.ub = meta_result$ci.ub[2],   
+      p_value = meta_result$pval[2],   
+      stringsAsFactors = FALSE
+    ))
+    
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,  
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, "- Psychosis vs HC"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+# Review the summary results
+view(meta_summary_results)
+
+```
+
+```{r}
+
+# 2. Age mean  
+
+selected_covariate <- "age_mean"
+
+# Filter out rows with missing values 
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),           
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           age_mean) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, age_mean)) %>%
+    na.omit()  
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least 5 studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Calculate pooled age mean across cases and controls
+    current_df_smd <- current_df_smd %>%
+      mutate(pooled_age_mean = ((`sample_size_Psychosis` * `age_mean_Psychosis`) + 
+                                  (`sample_size_HC` * `age_mean_HC`)) / 
+               (`sample_size_Psychosis` + `sample_size_HC`))
+    
+    # Run meta-regression with the pooled age mean as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ pooled_age_mean,   
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                  
+      yi = meta_result$beta[2],           
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,  
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, "- Psychosis vs HC"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+view(meta_summary_results)
+```
+
+```{r}
+
+# 3. FWHM - Combine across cases and controls
+
+selected_covariate <- "fwhm_median"
+
+# Filter out rows with missing values
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),           
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           fwhm_median) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, fwhm_median)) %>%
+    na.omit()  
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least 5 studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Calculate pooled FWHM median across cases and controls
+    current_df_smd <- current_df_smd %>%
+      mutate(pooled_fwhm_median = ((`sample_size_Psychosis` * `fwhm_median_Psychosis`) + 
+                                     (`sample_size_HC` * `fwhm_median_HC`)) / 
+               (`sample_size_Psychosis` + `sample_size_HC`))
+    
+    # Run meta-regression with the pooled FWHM median as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ pooled_fwhm_median,   
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                  
+      yi = meta_result$beta[2],           
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    # Print summary + plot the results
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,  
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, 
+                        "- FWHM (Pooled) Effect"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+view(meta_summary_results)
+
+```
+
+```{r}
+
+# 4. snr_median_value - combine across cases and controls
+
+selected_covariate <- "snr_median_value"
+
+# Filter out rows with missing values  
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),           
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           snr_median_value) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, snr_median_value)) %>%
+    na.omit()   
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least 5 studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Calculate pooled SNR median across cases and controls
+    current_df_smd <- current_df_smd %>%
+      mutate(pooled_snr_median = ((`sample_size_Psychosis` * `snr_median_value_Psychosis`) + 
+                                    (`sample_size_HC` * `snr_median_value_HC`)) / 
+               (`sample_size_Psychosis` + `sample_size_HC`))
+    
+    # Run meta-regression with the pooled SNR median as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ pooled_snr_median,  # Use pooled SNR median as the moderator
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                 
+      yi = meta_result$beta[2],           
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    # Print summary or plot the results
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,  
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, 
+                        "- SNR (Pooled) Effect"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+view(meta_summary_results)
+```
+
+```{r}
+
+# 5. male_percent - combine across cases and controls
+
+selected_covariate <- "male_percent"
+
+# Filter out rows with missing values 
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),           
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           male_percent) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, male_percent)) %>%
+    na.omit()   
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least five studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Calculate pooled male percent across cases and controls
+    current_df_smd <- current_df_smd %>%
+      mutate(pooled_male_percent = ((`sample_size_Psychosis` * `male_percent_Psychosis`) + 
+                                      (`sample_size_HC` * `male_percent_HC`)) / 
+               (`sample_size_Psychosis` + `sample_size_HC`))
+    
+    # Run meta-regression with the pooled male percent as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ pooled_male_percent,   
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                  
+      yi = meta_result$beta[2],          
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    # Print summary or plot the results
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,   
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, 
+                        "- Male Percent (Pooled) Effect"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+view(meta_summary_results)
+
+```
+
+```{r}
+
+# 6. medfree_percent - use medfree_percent in Psychosis group only
+
+selected_covariate <- "medfree_percent"
+
+# Filter out rows with missing values
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),           
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           medfree_percent) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, medfree_percent)) %>%
+    na.omit()   
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least five studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD 
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Run meta-regression with medfree_percent for the Psychosis group as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ `medfree_percent_Psychosis`,   
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                  
+      yi = meta_result$beta[2],          
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    # Print summary or plot the results
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,   
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, 
+                        "- Medfree Percent (Psychosis) Effect"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+view(meta_summary_results)
+# write_xlsx(meta_summary_results, path = "med_free.xlsx")
+
+```
+
+```{r}
+# 7. mednaive_percent - use mednaive_percent in Psychosis group only
+
+selected_covariate <- "mednaive_percent"
+
+# Filter out rows with missing values
+filtered_df <- merged_df %>%
+  drop_na(all_of(selected_covariate))
+
+# Dataframe to store the meta-regression results
+meta_summary_results <- data.frame(
+  brain_region = character(),
+  k = numeric(),          
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get unique brain regions
+regions <- unique(filtered_df$region)
+
+# Loop over each brain region
+for (current_reg in regions) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region and required variables
+  current_df <- filtered_df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c('Psychosis', 'HC')) %>%
+    select(diagnosis, ID, metabolite, region,
+           `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size,
+           mednaive_percent) %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, mednaive_percent)) %>%
+    na.omit()  
+  
+  # Debugging: Print the columns of current_df to ensure the pivot worked correctly
+  print(colnames(current_df))
+  
+  # Ensure there are at least five studies with complete data
+  if (nrow(current_df) >= 5) {
+    
+    # Calculate SMD  
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i = current_df$`sd (bilateral)_Psychosis`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Psychosis`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Run meta-regression with mednaive_percent for the Psychosis group as the moderator
+    meta_result <- rma(yi, vi, 
+                       mods = ~ `mednaive_percent_Psychosis`,   
+                       data = current_df_smd)
+    
+    # Store the results, including the number of studies (k)
+    meta_summary_results <- rbind(meta_summary_results, data.frame(
+      brain_region = current_reg,
+      k = meta_result$k,                  
+      yi = meta_result$beta[2],           
+      ci.lb = meta_result$ci.lb[2],       
+      ci.ub = meta_result$ci.ub[2],       
+      p_value = meta_result$pval[2],      
+      stringsAsFactors = FALSE
+    ))
+    
+    # Print summary or plot the results
+    print(summary(meta_result))
+    forest(meta_result, 
+           slab = current_df_smd$ID,  
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Meta-Regression for Choline levels in", current_reg, 
+                        "- Mednaive Percent (Psychosis) Effect"))
+    
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies with complete data.\n")
+  }
+}
+
+
+view(meta_summary_results)
+write_xlsx(meta_summary_results, path = "med_naive.xlsx")
+
+```

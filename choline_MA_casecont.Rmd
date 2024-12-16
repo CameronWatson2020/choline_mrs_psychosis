@@ -1,0 +1,442 @@
+---
+title: "choline_MA_casecont_comparisons"
+author: "Dr Cameron Watson"
+date: "2024-10-30"
+output: html_document
+---
+
+```{r}
+# load packages and set working directory
+
+library(tidyverse) 
+library(metafor) 
+library(readxl)
+library(RColorBrewer)
+library(writexl)
+library(ggplot2)
+library(grid)  
+
+setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls/")
+
+```
+
+```{r}
+
+# Use this xls for all results, including component prefrontal regions 
+# df <- read_excel("casecont_overall_psychosis.xls")  - pre Jack with Study IDs
+df <- read_excel("casecont_overall_psychosis_studyID.xls")  
+
+# Use this xls forcombing prefrontalvalues- no longer using
+# df <- read_excel("casecont_overall_psychosis_pfc.xls") 
+
+# Cleaning data -----
+
+# Convert cols to numeric type
+cols_to_numeric <- c('metabolite mean (bilateral)', 
+                     'sd (bilateral)',
+                     'metabolite mean (right)', 
+                     'sd (right)', 
+                     'metabolite mean (left)', 
+                     'sd (left)', 
+                     'sample_size')
+
+merged_df <- df %>% 
+  mutate(across(all_of(cols_to_numeric), ~as.numeric(as.character(.)))) 
+
+# Convert all metabolites to 'Choline'
+metab <- c('Choline', 'Cho + PCh', 'Cho/Cr', 'GPC + PCh', 'GPC + PCh/Cr', 'Cho/Water')
+
+merged_df <- merged_df %>% mutate(metabolite = case_when( metabolite %in% c('Cho + PCh', 
+                                                                            'Cho/Cr', 
+                                                                            'GPC + PCh', 
+                                                                            'GPC + PCh/Cr',
+                                                                            'Cho/cr', 
+                                                                            'Cho/cre',
+                                                                            'Cho + PCh',
+                                                                            'Cho/Water',
+                                                                            'Choline/Cr') ~ 'Choline', TRUE ~ metabolite ))
+
+# Combine metabolites to one column (bilateral from right and left)
+merged_df <- merged_df %>% mutate(`metabolite mean (bilateral)` = ifelse(
+    is.na(`metabolite mean (bilateral)`) & !is.na(`metabolite mean (right)`) & !is.na(`metabolite mean (left)`),
+    ((`metabolite mean (right)` * `sample_size` + `metabolite mean (left)` * `sample_size`) / 
+       (2 * `sample_size`)), `metabolite mean (bilateral)`
+  )
+)
+
+# when only left present
+merged_df <- merged_df %>% mutate(`metabolite mean (bilateral)` =
+                                    ifelse(is.na(`metabolite mean (bilateral)`) &
+                                             is.na(`metabolite mean (right)`) &
+                                             !is.na(`metabolite mean (left)`),`metabolite mean (left)`,`metabolite mean (bilateral)`))
+
+# when only right present 
+merged_df <- merged_df %>% mutate(`metabolite mean (bilateral)` =
+                                    ifelse(is.na(`metabolite mean (bilateral)`) &
+                                             !is.na(`metabolite mean (right)`) &
+                                             is.na(`metabolite mean (left)`),`metabolite mean (right)`,`metabolite mean (bilateral)`))
+
+# remove columns for R and L
+merged_df <- merged_df %>% select(-`metabolite mean (right)`,
+                                  -`metabolite mean (left)`)
+
+# standard deviation calculations
+merged_df <- merged_df %>% mutate( `sd (bilateral)` = case_when(
+  is.na(`sd (bilateral)`) & is.na(`sd (right)`) & !is.na(`sd (left)`) ~
+    `sd (left)`, is.na(`sd (bilateral)`) & is.na(`sd (left)`) &
+    !is.na(`sd (right)`) ~ `sd (right)`, TRUE ~ `sd (bilateral)` ) ) %>%
+  mutate( `sd (bilateral)` = ifelse(is.na(`sd (bilateral)`) &
+                                      !is.na(`sd (right)`) & !is.na(`sd (left)`), sqrt((1/4) *
+                                                                                         `sd (right)`^2 + (1/4) * `sd (left)`^2 + (1/2) * 0.8 * `sd (right)`
+                                                                                       * `sd (left)`), `sd (bilateral)` ) )
+
+# remove columns for R and L
+merged_df <- merged_df %>% select(-`sd (right)`,
+                                  -`sd (left)`)
+
+# Correct variations in brain region names and diagnosis
+merged_df <- merged_df %>%
+  mutate(
+    region = case_when(
+      region %in% c("Frontal white matter", "frontal white matter") ~ "Frontal white matter",
+      region %in% c("White matter (multiple locations)") ~ "Global white matter",
+      region %in% c("Grey matter (multiple locations)") ~ "Global grey matter",
+      TRUE ~ region
+    ),
+    diagnosis = case_when(
+      diagnosis %in% c("FEP", "Schizophrenia", "Unspecified psychosis", "UHR/CHR", "TRS") ~ "Psychosis",
+      TRUE ~ diagnosis
+    )
+  )
+
+# Check the total number of cases and controls, and the number of unique studies for each brain region
+region_case_control_summary <- merged_df %>%
+  filter(diagnosis %in% c("Psychosis", "HC")) %>%   
+  group_by(region) %>%
+  summarise(
+    total_cases = sum(sample_size[diagnosis == "Psychosis"], na.rm = TRUE),        
+    total_controls = sum(sample_size[diagnosis == "HC"], na.rm = TRUE),     
+    num_case_studies = n_distinct(ID[diagnosis == "Psychosis"]),                   
+    num_control_studies = n_distinct(ID[diagnosis == "HC"])                
+  )
+
+print(region_case_control_summary)
+
+# if you wanted to combine PFC - not doing currently
+# merged_df <- merged_df %>% mutate(region = case_when(region %in% c("dlPFC", "mPFC", "Other frontal lobe") ~ "Prefrontal",TRUE ~ region))
+
+```
+
+```{r}
+# Meta analysis (SMD, CVR & VR) -------
+
+# Create a list to store the results
+results_list <- list() 
+
+# create dataframes for results tables 
+psych_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+psych_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+psych_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up brain regions to loop on 
+reg <- unique(merged_df$region)
+
+# Create diagnosis variable for looping -> Psychosis vs healthy controls
+diagnoses <- c('Psychosis', 'HC')
+
+# Now conduct metas, looping over each brain region
+# Create a folder to save the plots
+output_folder <- "forest_plots"
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+}
+
+# Meta-analysis loop with plot saving
+for (current_reg in reg) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region
+  current_df <- merged_df %>% select(diagnosis, ID, metabolite, region,
+                                     `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, `First Author`) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+  
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup()
+  
+  # Pivot data and drop rows with any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size, `First Author`) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+  
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_Psychosis" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_Psychosis`) | `metabolite mean (bilateral)_Psychosis` != "NULL")
+  }
+  
+  # Only proceed if the brain region has 2 or more studies
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+  } else { 
+    # SMD Calculation and Meta-Analysis
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i=current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i=current_df$`sd (bilateral)_Psychosis`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n1i=current_df$`sample_size_Psychosis`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    smd_result <- rma(yi, vi, data = current_df_smd)
+    
+    # Plot SMD result and save
+    smd_plot_path <- file.path(output_folder, paste0("SMD_", current_reg, ".png"))
+    png(smd_plot_path, width = 800, height = 600)
+    forest(smd_result, 
+           slab = current_df_smd$`First Author`, 
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Forest Plot for Choline levels in", current_reg, "-", "Psychosis vs HC"))
+    dev.off()
+    
+    # CVR Calculation and Meta-Analysis
+    escalc_cvr_results <- escalc(measure = "CVR", 
+                                 m1i=current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i=current_df$`sd (bilateral)_Psychosis`,
+                                 n1i=current_df$`sample_size_Psychosis`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_cvr <- cbind(current_df, escalc_cvr_results)
+    cvr_result <- rma(yi, vi, data = current_df_cvr)
+    
+    # Plot CVR result and save
+    cvr_plot_path <- file.path(output_folder, paste0("CVR_", current_reg, ".png"))
+    png(cvr_plot_path, width = 800, height = 600)
+    forest(cvr_result, 
+           slab = current_df_cvr$`First Author`, 
+           xlab = "Coefficient of Variation Ratio (CVR)", 
+           main = paste("Forest Plot for CVR in Choline levels in", current_reg, "-", "Psychosis vs HC"))
+    dev.off()
+    
+    # VR Calculation and Meta-Analysis
+    escalc_vr_results <- escalc(measure = "VR", 
+                                m1i=current_df$`metabolite mean (bilateral)_Psychosis`,
+                                sd1i=current_df$`sd (bilateral)_Psychosis`,
+                                n1i=current_df$`sample_size_Psychosis`,
+                                m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                sd2i=current_df$`sd (bilateral)_HC`,
+                                n2i=current_df$`sample_size_HC`)
+    current_df_vr <- cbind(current_df, escalc_vr_results)
+    vr_result <- rma(yi, vi, data = current_df_vr)
+    
+    # Plot VR result and save
+    vr_plot_path <- file.path(output_folder, paste0("VR_", current_reg, ".png"))
+    png(vr_plot_path, width = 800, height = 600)
+    forest(vr_result, 
+           slab = current_df_vr$`First Author`, 
+           xlab = "Variance Ratio (VR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "Psychosis vs HC"))
+    dev.off()
+  } 
+}
+
+# Remove duplicate study rows 
+psych_smd_summary_results <- psych_smd_summary_results %>% distinct()
+psych_cvr_summary_results <- psych_cvr_summary_results %>% distinct()
+psych_vr_summary_results <- psych_vr_summary_results %>% distinct()
+
+# Save results to Excel
+write_xlsx(psych_smd_summary_results, path = "case_cont_smd_results.xlsx")
+write_xlsx(psych_cvr_summary_results, path = "case_cont_cvr_results.xlsx")
+write_xlsx(psych_vr_summary_results, path = "case_cont_vr_results.xlsx")
+
+```
+
+```{r}
+
+# Funnel plots and Egger's for SMD data 
+eggers_results <- data.frame(
+  brain_region = character(),
+  eggers_test_statistic = numeric(),
+  eggers_p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over each brain region as before
+for (current_reg in reg) {
+  # Subset data for the current brain region
+  current_df <- merged_df %>% 
+    filter(region == current_reg) %>%
+    select(diagnosis, ID, `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)
+  
+  # Group by study
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, 
+                values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+  
+  # Proceed if there are at least two studies for a funnel plot
+  if (nrow(current_df) >= 2) {
+    # Calculate SMD
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i=current_df$`metabolite mean (bilateral)_Psychosis`,
+                                 sd1i=current_df$`sd (bilateral)_Psychosis`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n1i=current_df$`sample_size_Psychosis`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Meta-analysis for SMD
+    smd_result <- rma(yi, vi, data = current_df_smd)
+    
+    # Funnel plot 
+    funnel(smd_result, main = paste("Funnel Plot for SMD in", current_reg, "- Psychosis vs HC"))
+    
+    # Perform Egger's test if there are 10 or more studies
+    if (nrow(current_df) >= 10) {
+      # Egger's test
+      egger_test <- regtest(smd_result, model = "lm", predictor = "sei")
+      
+      # add Egger's test results to the results data frame
+      eggers_results <- rbind(eggers_results, data.frame(
+        brain_region = current_reg,
+        eggers_test_statistic = egger_test$zval,   
+        eggers_p_value = egger_test$pval,        
+        stringsAsFactors = FALSE
+      ))
+      
+      cat("Egger's test for", current_reg, ":\n")
+      print(egger_test)
+    }
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies.\n")
+  }
+}
+print(eggers_results)
+
+# Merge Egger's test results into SMD summary results
+psych_smd_summary_results <- psych_smd_summary_results %>%
+  left_join(eggers_results, by = "brain_region")
+
+# Save the updated results to an Excel file
+write_xlsx(psych_smd_summary_results, path = "case_cont_smd_results_with_eggers.xlsx")
+
+```
+
+```{r}
+## plotting -------
+
+# Specify the order of brain regions from cortical to subcortical
+region_order <- c("dlPFC", "mPFC", "Other frontal lobe", "ACC", "PCC", "Temporal lobe", "Parietal lobe", "Occipital lobe", 
+                  "Global grey matter", "Global white matter", "Frontal white matter", "Corpus callosum", "Centrum semiovale", 
+                  "Cerebellum", "Striatum", "Thalamus", "Hippocampus")
+
+# Then reverse the order (ggplot puts them the wrong way weirdly)
+region_order <- rev(region_order)
+
+# Ensure brain regions are factors to maintain consistent ordering
+psych_smd_summary_results$brain_region <- factor(psych_smd_summary_results$brain_region, levels = region_order)
+psych_cvr_summary_results$brain_region <- factor(psych_cvr_summary_results$brain_region, levels = region_order)
+psych_vr_summary_results$brain_region <- factor(psych_vr_summary_results$brain_region, levels = region_order)
+
+# Create the SMD bar plot 
+smd_bar_plot <- ggplot(psych_smd_summary_results, aes(x = yi, y = brain_region, fill = diagnosis)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), color = "black", width = 0.8) +
+  geom_errorbar(aes(xmin = ci.lb, xmax = ci.ub), width = 0.2, position = position_dodge(width = 0.8)) +
+  theme_minimal(base_size = 15) +
+  labs(
+    title = "Choline Levels in Psychosis Spectrum Disorders vs Controls",
+    x = "Standardised Mean Difference (95% CI)",
+    y = "Brain Region"
+  ) +
+  theme(
+    axis.text.y = element_text(angle = 0, hjust = 1, size = 8),
+    axis.text.x = element_text(angle = 0, hjust = 1, size = 10),
+    axis.title.y = element_text(size = 10, face = "bold", margin = margin(r = 10)),  
+    axis.title.x = element_text(size = 10, face = "bold", margin = margin(t = 10)), 
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5, margin = margin(b = 25)),
+    legend.position = "none",
+    panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour = "grey"), 
+    panel.grid.minor = element_line(size = 0.25, linetype = 'solid', colour = "lightgrey"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm") 
+  ) +
+  scale_fill_manual(values = c("Psychosis" = "#aec7e8", "HC" = "#c6dbef"))  
+
+print(smd_bar_plot)
+
+ggsave("figure2.png", plot = smd_bar_plot, width = 7, height = 5, dpi = 300, bg = "white")
+
+# Create the CVR bar plot 
+cvr_bar_plot <- ggplot(psych_cvr_summary_results, aes(x = yi, y = brain_region, fill = diagnosis)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), color = "black", width = 0.8) +
+  geom_errorbar(aes(xmin = ci.lb, xmax = ci.ub), width = 0.2, position = position_dodge(width = 0.8)) +
+  theme_minimal(base_size = 15) +
+  labs(
+    title = "Choline Variability (CVR) in Psychosis Spectrum Disorders vs Controls",
+    x = "CVR (95% CI)",
+    y = "Brain Region"
+  ) +
+  theme(
+    axis.text.y = element_text(angle = 0, hjust = 1, size = 8),
+    axis.text.x = element_text(angle = 0, hjust = 1, size = 10),
+    axis.title.y = element_text(size = 10, face = "bold", margin = margin(r = 10)),  
+    axis.title.x = element_text(size = 10, face = "bold", margin = margin(t = 10)),  
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5, margin = margin(b = 25)),
+    legend.position = "none",
+    panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour = "grey"), 
+    panel.grid.minor = element_line(size = 0.25, linetype = 'solid', colour = "lightgrey"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  ) +
+  scale_fill_manual(values = c("Psychosis" = "#FFB7CE", "HC" = "#c6dbef"))  
+
+print(cvr_bar_plot)
+ggsave("cvr_combined.png", plot = cvr_bar_plot, width = 7, height = 5, dpi = 300, bg = "white")
+
+```

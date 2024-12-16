@@ -1,0 +1,1379 @@
+---
+title: "Choline meta-analysis for all diagnoses"
+output: html_document
+date: "June 2024"
+---
+install.packages("metafor")
+install.packages("readcsv")
+install.packages("ggplot2")
+install.packages("RColorBrewer")
+install.packages("writexl")
+
+
+```{r}
+setwd("~/Documents/Medicine/Research/Psychosis/MRS Choline in Psychosis/master_xls")
+
+library(tidyverse)  
+library(metafor) 
+library(readxl)
+library(RColorBrewer)
+library(writexl)
+
+# All psychosis groups 
+# A) All brain regions 
+df <- read_excel("all_diagnoses_data.xls")
+
+# B) Load data with combined PFC groups 
+# df <- read_excel("master_xls/all_diagnoses_data_pfc.xls")
+
+# Cleaning data -----
+
+# Convert cols to numeric type
+cols_to_numeric <- c('metabolite mean (bilateral)', 
+                     'sd (bilateral)',
+                     'metabolite mean (right)', 
+                     'sd (right)', 
+                     'metabolite mean (left)', 
+                     'sd (left)', 
+                     'sample_size')
+df <- df %>% 
+  mutate(across(all_of(cols_to_numeric), ~as.numeric(as.character(.))))
+
+# Convert all metabolites to 'Choline'
+metab <- c('Choline', 'Cho + PCh', 'Cho/Cr', 'GPC + PCh', 'GPC + PCh/Cr', 'Cho/Water')
+
+df <- df %>% mutate(metabolite = case_when( metabolite %in% c('Cho + PCh', 
+                                                              'Cho/Cr', 
+                                                              'GPC + PCh', 
+                                                              'GPC + PCh/Cr',
+                                                              'Cho/cr', 
+                                                              'Cho/cre',
+                                                              'Cho + PCh',
+                                                              'Cho/Water',
+                                                              'Choline/Cr') ~ 'Choline', TRUE ~ metabolite ))
+
+# Combine metabolites all to one column (bilateral from right and left) - I have changed this for now
+df <- df %>% mutate(
+  `metabolite mean (bilateral)` = ifelse(
+    is.na(`metabolite mean (bilateral)`) & !is.na(`metabolite mean (right)`) & !is.na(`metabolite mean (left)`),
+    ((`metabolite mean (right)` * `sample_size` + `metabolite mean (left)` * `sample_size`) / 
+     (2 * `sample_size`)),
+    `metabolite mean (bilateral)`
+  )
+)
+
+# when only left
+df <- df %>% mutate(`metabolite mean (bilateral)` =
+ifelse(is.na(`metabolite mean (bilateral)`) &
+is.na(`metabolite mean (right)`) &
+!is.na(`metabolite mean (left)`),`metabolite mean (left)`,`metabolite mean (bilateral)`))
+
+# when only right
+df <- df %>% mutate(`metabolite mean (bilateral)` =
+ifelse(is.na(`metabolite mean (bilateral)`) &
+!is.na(`metabolite mean (right)`) &
+is.na(`metabolite mean (left)`),`metabolite mean (right)`,`metabolite mean (bilateral)`))
+
+# remove columns for R and L
+df <- df %>% select(-`metabolite mean (right)`,
+-`metabolite mean (left)`)
+
+# standard deviation calculations
+df <- df %>% mutate( `sd (bilateral)` = case_when(
+is.na(`sd (bilateral)`) & is.na(`sd (right)`) & !is.na(`sd (left)`) ~
+`sd (left)`, is.na(`sd (bilateral)`) & is.na(`sd (left)`) &
+!is.na(`sd (right)`) ~ `sd (right)`, TRUE ~ `sd (bilateral)` ) ) %>%
+mutate( `sd (bilateral)` = ifelse(is.na(`sd (bilateral)`) &
+!is.na(`sd (right)`) & !is.na(`sd (left)`), sqrt((1/4) *
+`sd (right)`^2 + (1/4) * `sd (left)`^2 + (1/2) * 0.8 * `sd (right)`
+* `sd (left)`), `sd (bilateral)` ) )
+
+# remove columns for R and L
+df <- df %>% select(-`sd (right)`,
+-`sd (left)`)
+
+# Correct variations in brain region names
+df <- df %>%
+  mutate(region = case_when(
+    region %in% c("Frontal white matter", "frontal white matter") ~ "Frontal white matter",
+    TRUE ~ region
+  ))
+
+df <- df %>%
+  mutate(diagnosis = case_when(
+    diagnosis %in% c("Unspecified psychosis") ~ "other_psychosis",
+    TRUE ~ diagnosis
+  ))
+
+# Only use this when combining prefrontal groups --------------------
+# df <- df %>% mutate(region = case_when(region %in% c("dlPFC", "mPFC", "Other frontal lobe") ~"Prefrontal",TRUE ~ region))
+
+```
+
+
+```{r}
+# Clinical High Risk Populations - Meta analysis ------- this is out of date - just used CHR results from established psychosis
+
+# Create dataframes to store overall SMD, CVR, and VR results
+chr_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+chr_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+chr_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables ----
+
+# 1) create variable for looping through brain regions
+reg <- unique(df$region)
+
+# 2) create variable for looping -> CHR vs control 
+diagnoses <- c('UHR/CHR', 'HC')
+
+# Loop over each brain region
+for (current_reg in reg) {
+  cat("Processing brain region:", current_reg, "\n")   
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                                     `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "UHR/CHR") %in% diagnosis)) %>%
+    ungroup()
+
+  print(current_df)
+
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_UHR/CHR" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_UHR/CHR`) | `metabolite mean (bilateral)_UHR/CHR` != "NULL")
+  }
+
+  # Check if the data frame has less than two studies
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+  } else { 
+    # Calculate SMD effect size using escalc
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i=current_df$`metabolite mean (bilateral)_UHR/CHR`,
+                                 sd1i=current_df$`sd (bilateral)_UHR/CHR`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n1i=current_df$`sample_size_UHR/CHR`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+
+    # Meta-analyze SMD
+    smd_result <- rma(yi, vi, data = current_df_smd)
+
+    # Store overall SMD and CI for each brain region in summary_results dataframe
+    chr_smd_summary_results <- rbind(chr_smd_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "CHR",
+      yi = smd_result$beta[1], # Extract the overall SMD estimate
+      ci.lb = smd_result$ci.lb[1], # Extract the lower bound of CI
+      ci.ub = smd_result$ci.ub[1], # Extract the upper bound of CI
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot results 
+    forest(smd_result, 
+           slab = current_df_smd$ID, 
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Forest Plot for Choline levels in", current_reg, "-", "UHR/CHR vs HC"))
+
+    # Calculate CVR using escalc
+    escalc_cvr_results <- escalc(measure = "CVR", 
+                                 m1i=current_df$`metabolite mean (bilateral)_UHR/CHR`,
+                                 sd1i=current_df$`sd (bilateral)_UHR/CHR`,
+                                 n1i=current_df$`sample_size_UHR/CHR`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_cvr <- cbind(current_df, escalc_cvr_results)
+
+    # Meta-analyze CVR
+    cvr_result <- rma(yi, vi, data = current_df_cvr)
+
+    # Store overall CVR and CI for each brain region 
+    chr_cvr_summary_results <- rbind(chr_cvr_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "CHR",
+      yi = cvr_result$beta[1], 
+      ci.lb = cvr_result$ci.lb[1], 
+      ci.ub = cvr_result$ci.ub[1], 
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot CVR results 
+    forest(cvr_result, 
+           slab = current_df_cvr$ID,
+           xlab = "Coefficient of Variation Ratio (CVR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "UHR/CHR vs HC"))
+
+    # Calculate VR using escalc
+    escalc_vr_results <- escalc(measure = "VR", 
+                                 m1i=current_df$`metabolite mean (bilateral)_UHR/CHR`,
+                                 sd1i=current_df$`sd (bilateral)_UHR/CHR`,
+                                 n1i=current_df$`sample_size_UHR/CHR`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_vr <- cbind(current_df, escalc_vr_results)
+
+    # Meta-analyze VR
+    vr_result <- rma(yi, vi, data = current_df_vr)
+
+    # Store overall VR and results
+    chr_vr_summary_results <- rbind(chr_vr_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "CHR",
+      yi = vr_result$beta[1], 
+      ci.lb = vr_result$ci.lb[1], 
+      ci.ub = vr_result$ci.ub[1], 
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot VR results
+    forest(vr_result, 
+           slab = current_df_vr$ID,
+           xlab = "Variance Ratio (VR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "UHR/CHR vs HC"))
+
+  } 
+}
+
+chr_smd_summary_results <- chr_smd_summary_results %>% distinct()
+chr_cvr_summary_results <- chr_cvr_summary_results %>% distinct()
+chr_vr_summary_results <- chr_vr_summary_results %>% distinct()
+
+# Print the summary of meta-analysis results
+print(chr_smd_summary_results)
+print(chr_cvr_summary_results)
+print(chr_vr_summary_results)
+
+
+```
+
+
+```{r}
+
+# First Episode Psychosis - Meta-analysis -------
+
+# Create dataframes to store overall SMD, CVR, and VR results with additional fields
+fep_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+fep_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+fep_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables ----
+
+# 1) create variable for looping through brain regions
+reg <- unique(df$region)
+
+# 2) create variable for looping -> FEP vs control 
+diagnoses <- c('FEP', 'HC')
+
+# Loop over each brain region
+for (current_reg in reg) {
+  cat("Processing brain region:", current_reg, "\n")   
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                               `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "FEP") %in% diagnosis)) %>%
+    ungroup()
+
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_FEP" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_FEP`) | `metabolite mean (bilateral)_FEP` != "NULL")
+  }
+
+  # Check if the data frame has < 2 studies 
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+    next
+  }
+
+  # Calculate total cases, controls, and number of studies
+  total_cases <- sum(current_df$`sample_size_FEP`, na.rm = TRUE)
+  total_controls <- sum(current_df$`sample_size_HC`, na.rm = TRUE)
+  num_studies <- nrow(current_df)
+
+  ### SMD Meta-analysis
+  escalc_smd_results <- escalc(measure = "SMD", 
+                               m1i = current_df$`metabolite mean (bilateral)_FEP`,
+                               sd1i = current_df$`sd (bilateral)_FEP`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n1i = current_df$`sample_size_FEP`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_smd <- cbind(current_df, escalc_smd_results)
+  
+  smd_result <- rma(yi, vi, data = current_df_smd, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+
+  # Store SMD results 
+  fep_smd_summary_results <- rbind(fep_smd_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "FEP",
+    yi = smd_result$beta[1], 
+    ci.lb = smd_result$ci.lb[1], 
+    ci.ub = smd_result$ci.ub[1], 
+    p_value = smd_result$pval, 
+    I2 = smd_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+
+  # Plot SMD results 
+  forest(smd_result, slab = current_df_smd$ID, xlab = "Standardized Mean Difference (SMD)", 
+         main = paste("Forest Plot for Choline levels in", current_reg, "-", "FEP vs HC"))
+
+  ### VR Meta-analysis
+  escalc_vr_results <- escalc(measure = "VR", 
+                              m1i = current_df$`metabolite mean (bilateral)_FEP`,
+                              sd1i = current_df$`sd (bilateral)_FEP`,
+                              n1i = current_df$`sample_size_FEP`,
+                              m2i = current_df$`metabolite mean (bilateral)_HC`,
+                              sd2i = current_df$`sd (bilateral)_HC`,
+                              n2i = current_df$`sample_size_HC`)
+  current_df_vr <- cbind(current_df, escalc_vr_results)
+
+  vr_result <- rma(yi, vi, data = current_df_vr, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+
+  # Store VR results  
+  fep_vr_summary_results <- rbind(fep_vr_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "FEP",
+    yi = vr_result$beta[1],
+    ci.lb = vr_result$ci.lb[1],
+    ci.ub = vr_result$ci.ub[1],
+    p_value = vr_result$pval,
+    I2 = vr_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+
+  # Plot VR results
+  forest(vr_result, slab = current_df_vr$ID, xlab = "Variance Ratio (VR)", 
+         main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "FEP vs HC"))
+}
+
+# Final distinct summary results for SMD and VR - have excluded CVR for now as issues, see below
+fep_smd_summary_results <- fep_smd_summary_results %>% distinct()
+fep_vr_summary_results <- fep_vr_summary_results %>% distinct()
+
+print(fep_smd_summary_results)
+print(fep_vr_summary_results)
+
+# there are issues including CVR in the FEP loop, so this is done seperately 
+
+# First Episode Psychosis - CVR Meta-analysis  -------
+
+#  CVR df
+fep_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables for CVR analysis ----
+reg <- unique(df$region)  
+diagnoses <- c('FEP', 'HC')  
+
+# Loop over each brain region
+for (current_reg in reg) {
+  cat("Processing brain region for CVR:", current_reg, "\n")  
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                               `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses, region == current_reg)  
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "FEP") %in% diagnosis)) %>%
+    ungroup()
+
+  current_df <- current_df %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Check if data is available
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to insufficient data.\n")
+    next
+  }
+
+  # Calculate total cases, controls, and number of studies
+  total_cases <- sum(current_df$`sample_size_FEP`, na.rm = TRUE)
+  total_controls <- sum(current_df$`sample_size_HC`, na.rm = TRUE)
+  num_studies <- nrow(current_df)
+
+  # CVR Calculation and Meta-Analysis
+  escalc_cvr_results <- escalc(measure = "CVR", 
+                               m1i = current_df$`metabolite mean (bilateral)_FEP`,
+                               sd1i = current_df$`sd (bilateral)_FEP`,
+                               n1i = current_df$`sample_size_FEP`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_cvr <- cbind(current_df, escalc_cvr_results)
+
+  # Meta-analyze CVR with error handling for convergence issues
+  tryCatch({
+    cvr_result <- rma(yi, vi, data = current_df_cvr, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+    
+    # Store CVR results
+    fep_cvr_summary_results <- rbind(fep_cvr_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "FEP",
+      yi = cvr_result$beta[1],
+      ci.lb = cvr_result$ci.lb[1],
+      ci.ub = cvr_result$ci.ub[1],
+      p_value = cvr_result$pval,
+      I2 = cvr_result$I2,
+      total_cases = total_cases,
+      total_controls = total_controls,
+      num_studies = num_studies,
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot CVR results
+    forest(cvr_result, slab = current_df_cvr$ID, xlab = "Coefficient of Variation Ratio (CVR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "FEP vs HC"))
+
+  }, error = function(e) {
+    cat("Error in CVR meta-analysis for", current_reg, ":", e$message, "\n")
+  })
+}
+
+# Remove duplicate rows (if any)
+fep_cvr_summary_results <- fep_cvr_summary_results %>% distinct()
+
+# Print the summary of CVR meta-analysis results
+print(fep_cvr_summary_results)
+
+# First Episode Psychosis - Funnel Plots and Egger's Test for SMD -------
+
+# Create a dataframe to store Egger's test results for SMD
+eggers_results <- data.frame(
+  brain_region = character(),
+  egger_test_statistic = numeric(),
+  egger_p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over each brain region based on the SMD results
+for (current_reg in fep_smd_summary_results$brain_region) {
+  # Subset the original data for the current brain region
+  current_df <- df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c("FEP", "HC")) %>%
+    select(diagnosis, ID, `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)
+
+  # Group by study ID  
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "FEP") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Proceed if there are at least two studies for a funnel plot
+  if (nrow(current_df) >= 2) {
+    # Calculate SMD effect size using escalc
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_FEP`,
+                                 sd1i = current_df$`sd (bilateral)_FEP`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_FEP`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Meta-analysis for SMD
+    smd_result <- rma(yi, vi, data = current_df_smd)
+    
+    # Funnel plot for SMD
+    funnel(smd_result, main = paste("Funnel Plot for SMD in", current_reg, "- FEP vs HC"))
+    
+    # Perform Egger's test if there are 10 or more studies
+    if (nrow(current_df) >= 10) {
+      # Egger's test
+      egger_test <- regtest(smd_result, model = "lm", predictor = "sei")
+      
+      # add Egger's test results to the results data frame
+      eggers_results <- rbind(eggers_results, data.frame(
+        brain_region = current_reg,
+        egger_test_statistic = egger_test$zval,  
+        egger_p_value = egger_test$pval,          
+        stringsAsFactors = FALSE
+      ))
+      
+      cat("Egger's test for", current_reg, ":\n")
+      print(egger_test)
+    }
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies.\n")
+  }
+}
+
+# Merge Egger's results with the SMD summary results
+combined_smd_results <- fep_smd_summary_results %>%
+  left_join(eggers_results, by = "brain_region")
+
+print(combined_smd_results)
+
+# Save the SMD, CVR, and VR results to combined Excel files
+write_xlsx(list(SMD_Results = combined_smd_results, 
+                CVR_Results = fep_cvr_summary_results, 
+                VR_Results = fep_vr_summary_results), 
+           path = "fep_meta_analysis_results.xlsx")
+
+```
+
+```{r}
+# Unspecified Psychosis - Meta-analysis -------
+
+# Create dataframes to store overall SMD, CVR, and VR results with additional fields
+up_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+up_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+up_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables ----
+reg <- unique(df$region)
+diagnoses <- c('other_psychosis', 'HC')
+
+# Loop over each brain region
+for (current_reg in reg) {
+  cat("Processing brain region:", current_reg, "\n")
+  
+  # Subset data for the current brain region
+  current_df <- df %>%
+    filter(region == current_reg, diagnosis %in% diagnoses) %>%
+    select(diagnosis, ID, metabolite, region, `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "other_psychosis") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Check if there are sufficient studies for analysis
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to insufficient data.\n")
+    next
+  }
+
+  # Calculate total cases, controls, and number of studies
+  total_cases <- sum(current_df$`sample_size_other_psychosis`, na.rm = TRUE)
+  total_controls <- sum(current_df$`sample_size_HC`, na.rm = TRUE)
+  num_studies <- nrow(current_df)
+
+  # SMD meta-analysis
+  escalc_smd_results <- escalc(measure = "SMD", 
+                               m1i = current_df$`metabolite mean (bilateral)_other_psychosis`,
+                               sd1i = current_df$`sd (bilateral)_other_psychosis`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n1i = current_df$`sample_size_other_psychosis`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_smd <- cbind(current_df, escalc_smd_results)
+  smd_result <- rma(yi, vi, data = current_df_smd)
+  
+  # Store SMD results
+  up_smd_summary_results <- rbind(up_smd_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "other_psychosis",
+    yi = smd_result$beta[1],
+    ci.lb = smd_result$ci.lb[1],
+    ci.ub = smd_result$ci.ub[1],
+    p_value = smd_result$pval,
+    I2 = smd_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+
+  # CVR meta-analysis
+  escalc_cvr_results <- escalc(measure = "CVR", 
+                               m1i = current_df$`metabolite mean (bilateral)_other_psychosis`,
+                               sd1i = current_df$`sd (bilateral)_other_psychosis`,
+                               n1i = current_df$`sample_size_other_psychosis`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_cvr <- cbind(current_df, escalc_cvr_results)
+  cvr_result <- rma(yi, vi, data = current_df_cvr)
+
+  # Store CVR results
+  up_cvr_summary_results <- rbind(up_cvr_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "other_psychosis",
+    yi = cvr_result$beta[1],
+    ci.lb = cvr_result$ci.lb[1],
+    ci.ub = cvr_result$ci.ub[1],
+    p_value = cvr_result$pval,
+    I2 = cvr_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+
+  # VR meta-analysis
+  escalc_vr_results <- escalc(measure = "VR", 
+                               m1i = current_df$`metabolite mean (bilateral)_other_psychosis`,
+                               sd1i = current_df$`sd (bilateral)_other_psychosis`,
+                               n1i = current_df$`sample_size_other_psychosis`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_vr <- cbind(current_df, escalc_vr_results)
+  vr_result <- rma(yi, vi, data = current_df_vr)
+
+  # Store VR results
+  up_vr_summary_results <- rbind(up_vr_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "other_psychosis",
+    yi = vr_result$beta[1],
+    ci.lb = vr_result$ci.lb[1],
+    ci.ub = vr_result$ci.ub[1],
+    p_value = vr_result$pval,
+    I2 = vr_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Remove duplicate rows if any
+up_smd_summary_results <- up_smd_summary_results %>% distinct()
+up_cvr_summary_results <- up_cvr_summary_results %>% distinct()
+up_vr_summary_results <- up_vr_summary_results %>% distinct()
+
+# Print the summary of meta-analysis results
+print(up_smd_summary_results)
+print(up_cvr_summary_results)
+print(up_vr_summary_results)
+
+# Save the summary data frames to Excel files if needed
+write_xlsx(up_smd_summary_results, path = "up_smd_results.xlsx")
+write_xlsx(up_cvr_summary_results, path = "up_cvr_results.xlsx")
+write_xlsx(up_vr_summary_results, path = "up_vr_results.xlsx")
+
+```
+
+```{r}
+
+# Schizophrenia - Meta Analysis  -------
+
+# Create dataframes to store overall SMD, CVR, and VR results for each brain region
+sz_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+sz_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+sz_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  p_value = numeric(),
+  I2 = numeric(),
+  total_cases = numeric(),
+  total_controls = numeric(),
+  num_studies = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables
+reg <- unique(df$region)
+diagnoses <- c('Schizophrenia', 'HC')
+
+# Loop over each brain region
+for (current_reg in reg) {
+  cat("Processing brain region:", current_reg, "\n") 
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                              `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+  
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Schizophrenia") %in% diagnosis)) %>%
+    ungroup()
+  
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+  
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_Schizophrenia" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_Schizophrenia`) | `metabolite mean (bilateral)_Schizophrenia` != "NULL")
+  }
+  
+  # Check if there is insufficient data
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+    next
+  } 
+  
+  # Calculate total cases, controls, and number of studies
+  total_cases <- sum(current_df$`sample_size_Schizophrenia`, na.rm = TRUE)
+  total_controls <- sum(current_df$`sample_size_HC`, na.rm = TRUE)
+  num_studies <- nrow(current_df)
+  
+  # SMD Calculation and Meta-Analysis
+  escalc_smd_results <- escalc(measure = "SMD", 
+                               m1i = current_df$`metabolite mean (bilateral)_Schizophrenia`,
+                               sd1i = current_df$`sd (bilateral)_Schizophrenia`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n1i = current_df$`sample_size_Schizophrenia`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_smd <- cbind(current_df, escalc_smd_results)
+  smd_result <- rma(yi, vi, data = current_df_smd)
+  
+  # Store SMD results  
+  sz_smd_summary_results <- rbind(sz_smd_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "Schizophrenia",
+    yi = smd_result$beta[1],
+    ci.lb = smd_result$ci.lb[1],
+    ci.ub = smd_result$ci.ub[1],
+    p_value = smd_result$pval,
+    I2 = smd_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+  
+  # Plot SMD results 
+  forest(smd_result, 
+         slab = current_df_smd$ID, 
+         xlab = "Standardized Mean Difference (SMD)", 
+         main = paste("Forest Plot for Choline levels in", current_reg, "-", "Schizophrenia vs HC"))
+  
+  # CVR Calculation and Meta-Analysis
+  escalc_cvr_results <- escalc(measure = "CVR", 
+                               m1i = current_df$`metabolite mean (bilateral)_Schizophrenia`,
+                               sd1i = current_df$`sd (bilateral)_Schizophrenia`,
+                               n1i = current_df$`sample_size_Schizophrenia`,
+                               m2i = current_df$`metabolite mean (bilateral)_HC`,
+                               sd2i = current_df$`sd (bilateral)_HC`,
+                               n2i = current_df$`sample_size_HC`)
+  current_df_cvr <- cbind(current_df, escalc_cvr_results)
+  cvr_result <- rma(yi, vi, data = current_df_cvr)
+  
+  # Store CVR results 
+  sz_cvr_summary_results <- rbind(sz_cvr_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "Schizophrenia",
+    yi = cvr_result$beta[1],
+    ci.lb = cvr_result$ci.lb[1],
+    ci.ub = cvr_result$ci.ub[1],
+    p_value = cvr_result$pval,
+    I2 = cvr_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+  
+  # Plot CVR results 
+  forest(cvr_result, 
+         slab = current_df_cvr$ID, 
+         xlab = "Coefficient of Variation Ratio (CVR)", 
+         main = paste("Forest Plot for CVR in Choline levels in", current_reg, "-", "Schizophrenia vs HC"))
+  
+  # VR Calculation and Meta-Analysis
+  escalc_vr_results <- escalc(measure = "VR", 
+                              m1i = current_df$`metabolite mean (bilateral)_Schizophrenia`,
+                              sd1i = current_df$`sd (bilateral)_Schizophrenia`,
+                              n1i = current_df$`sample_size_Schizophrenia`,
+                              m2i = current_df$`metabolite mean (bilateral)_HC`,
+                              sd2i = current_df$`sd (bilateral)_HC`,
+                              n2i = current_df$`sample_size_HC`)
+  current_df_vr <- cbind(current_df, escalc_vr_results)
+  vr_result <- rma(yi, vi, data = current_df_vr)
+  
+  # Store VR summary results  
+  sz_vr_summary_results <- rbind(sz_vr_summary_results, data.frame(
+    brain_region = current_reg,
+    diagnosis = "Schizophrenia",
+    yi = vr_result$beta[1],
+    ci.lb = vr_result$ci.lb[1],
+    ci.ub = vr_result$ci.ub[1],
+    p_value = vr_result$pval,
+    I2 = vr_result$I2,
+    total_cases = total_cases,
+    total_controls = total_controls,
+    num_studies = num_studies,
+    stringsAsFactors = FALSE
+  ))
+  
+  # Plot VR results 
+  forest(vr_result, 
+         slab = current_df_vr$ID, 
+         xlab = "Variance Ratio (VR)", 
+         main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "Schizophrenia vs HC"))
+}
+
+# Remove duplicate rows (if any) and save results
+sz_smd_summary_results <- sz_smd_summary_results %>% distinct()
+sz_cvr_summary_results <- sz_cvr_summary_results %>% distinct()
+sz_vr_summary_results <- sz_vr_summary_results %>% distinct()
+
+# Save results to Excel
+write_xlsx(sz_cvr_summary_results, path = "sz_cvr_results.xlsx")
+write_xlsx(sz_vr_summary_results, path = "sz_vr_results.xlsx")
+
+```
+
+```{r}
+# Funnel Plots and Egger's Test for Schizophrenia SMD Results -------
+
+sz_eggers_results <- data.frame(
+  brain_region = character(),
+  egger_test_statistic = numeric(),
+  egger_p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over each brain region based on the SMD results
+for (current_reg in sz_smd_summary_results$brain_region) {
+  # Subset the original data for the current brain region
+  current_df <- df %>%
+    filter(region == current_reg) %>%
+    filter(diagnosis %in% c("Schizophrenia", "HC")) %>%
+    select(diagnosis, ID, `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)
+
+  # Group by study ID 
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "Schizophrenia") %in% diagnosis)) %>%
+    ungroup() %>%
+    pivot_wider(names_from = diagnosis, 
+                values_from = c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Proceed if there are at least two studies for a funnel plot
+  if (nrow(current_df) >= 2) {
+    # Calculate SMD effect size using escalc
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i = current_df$`metabolite mean (bilateral)_Schizophrenia`,
+                                 sd1i = current_df$`sd (bilateral)_Schizophrenia`,
+                                 m2i = current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i = current_df$`sd (bilateral)_HC`,
+                                 n1i = current_df$`sample_size_Schizophrenia`,
+                                 n2i = current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+    
+    # Meta-analysis for SMD
+    smd_result <- rma(yi, vi, data = current_df_smd)
+    
+    # Funnel plot for SMD
+    funnel(smd_result, main = paste("Funnel Plot for SMD in", current_reg, "- Schizophrenia vs HC"))
+    
+    # Perform Egger's test if there are 10 or more studies
+    if (nrow(current_df) >= 10) {
+      # Egger's test
+      egger_test <- regtest(smd_result, model = "lm", predictor = "sei")
+      
+      # add Egger's test results to the results data frame
+      sz_eggers_results <- rbind(sz_eggers_results, data.frame(
+        brain_region = current_reg,
+        egger_test_statistic = egger_test$zval,   
+        egger_p_value = egger_test$pval,          
+        stringsAsFactors = FALSE
+      ))
+      
+      cat("Egger's test for", current_reg, ":\n")
+      print(egger_test)
+    }
+  } else {
+    cat("Skipping brain region:", current_reg, "due to insufficient studies.\n")
+  }
+}
+
+# Merge Egger's results with the Schizophrenia SMD summary results
+combined_sz_smd_results <- sz_smd_summary_results %>%
+  left_join(sz_eggers_results, by = "brain_region")
+
+print(combined_sz_smd_results)
+
+# Save the combined results to an Excel file
+write_xlsx(combined_sz_smd_results, path = "combined_sz_smd_results_with_eggers.xlsx")
+
+```
+
+```{r}
+# Treatment-Resistant Schizophrenia (TRS) - again use the other sheet unless for plotting 
+
+# Create lists to store the results
+results_list_smd <- list()
+results_list_cvr <- list()
+
+# Create dataframes to store overall SMD and CVR results for each brain region (summary)
+trs_smd_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+trs_cvr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+trs_vr_summary_results <- data.frame(
+  brain_region = character(),
+  diagnosis = character(),
+  yi = numeric(),
+  ci.lb = numeric(),
+  ci.ub = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Setting up loop variables ----
+
+# 1) create variable for looping through brain regions
+reg <- unique(df$region)
+
+# 2) create variable for looping -> TRS vs control 
+diagnoses <- c('TRS', 'HC')
+
+# Loop over each brain region for SMD
+for (current_reg in reg) {
+  cat("Processing brain region for SMD:", current_reg, "\n")   
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                              `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "TRS") %in% diagnosis)) %>%
+    ungroup()
+
+  print(current_df)
+
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_TRS" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_TRS`) | `metabolite mean (bilateral)_TRS` != "NULL")
+  }
+
+  # Check if the data frame has enough studies 
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+  } else { 
+    # Calculate SMD effect size using escalc
+    escalc_smd_results <- escalc(measure = "SMD", 
+                                 m1i=current_df$`metabolite mean (bilateral)_TRS`,
+                                 sd1i=current_df$`sd (bilateral)_TRS`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n1i=current_df$`sample_size_TRS`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_smd <- cbind(current_df, escalc_smd_results)
+
+    # Meta-analyze SMD
+    smd_result <- rma(yi, vi, data = current_df_smd, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+
+    # Store overall SMD results
+    trs_smd_summary_results <- rbind(trs_smd_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "TRS",
+      yi = smd_result$beta[1], 
+      ci.lb = smd_result$ci.lb[1],  
+      ci.ub = smd_result$ci.ub[1], 
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot result 
+    forest(smd_result, 
+           slab = current_df_smd$ID, 
+           xlab = "Standardized Mean Difference (SMD)", 
+           main = paste("Forest Plot for Choline levels in", current_reg, "-", "TRS vs HC"))
+
+  } 
+}
+
+trs_smd_summary_results <- trs_smd_summary_results %>% distinct()
+
+# Print the summary of meta-analysis results for SMD
+print(trs_smd_summary_results)
+
+# Loop over each brain region for CVR
+for (current_reg in reg) {
+  cat("Processing brain region for CVR:", current_reg, "\n")   
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                              `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "TRS") %in% diagnosis)) %>%
+    ungroup()
+
+  print(current_df)
+
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_TRS" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_TRS`) | `metabolite mean (bilateral)_TRS` != "NULL")
+  }
+
+  # Check if the data frame is empty
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+  } else { 
+    # Calculate CVR effect size using escalc
+    escalc_cvr_results <- escalc(measure = "CVR", 
+                                 m1i=current_df$`metabolite mean (bilateral)_TRS`,
+                                 sd1i=current_df$`sd (bilateral)_TRS`,
+                                 n1i=current_df$`sample_size_TRS`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_cvr <- cbind(current_df, escalc_cvr_results)
+
+    # Meta-analyze CVR
+    cvr_result <- rma(yi, vi, data = current_df_cvr, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+
+    # Store overall CVR results 
+    trs_cvr_summary_results <- rbind(trs_cvr_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "TRS",
+      yi = cvr_result$beta[1],  
+      ci.lb = cvr_result$ci.lb[1],  
+      ci.ub = cvr_result$ci.ub[1],  
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot CVR results 
+    forest(cvr_result, 
+           slab = current_df_cvr$ID,  
+           xlab = "Coefficient of Variation Ratio (CVR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "TRS vs HC"))
+
+  } 
+}
+
+trs_cvr_summary_results <- trs_cvr_summary_results %>% distinct()
+
+# Print the summary of meta-analysis results for CVR
+print(trs_cvr_summary_results)
+
+# Loop over each brain region for VR
+for (current_reg in reg) {
+  cat("Processing brain region for VR:", current_reg, "\n")   
+  
+  # Subset data for the current brain region
+  current_df <- df %>% select(diagnosis, ID, metabolite, region,
+                              `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    filter(diagnosis %in% diagnoses) %>% 
+    filter(region == current_reg)
+
+  current_df <- current_df %>%
+    group_by(ID) %>%
+    filter(all(c("HC", "TRS") %in% diagnosis)) %>%
+    ungroup()
+
+  print(current_df)
+
+  # Pivot the data and drop if any missing data
+  current_df <- current_df %>% select(diagnosis, ID, metabolite, region,
+                                      `metabolite mean (bilateral)`, `sd (bilateral)`, sample_size) %>%
+    pivot_wider(names_from = diagnosis, values_from =
+                  c(`metabolite mean (bilateral)`, `sd (bilateral)`, sample_size)) %>%
+    na.omit()
+
+  # Drop rows with only healthy controls
+  if ("metabolite mean (bilateral)_TRS" %in% colnames(current_df)) {
+    current_df <- current_df %>%
+      filter(!is.na(`metabolite mean (bilateral)_TRS`) | `metabolite mean (bilateral)_TRS` != "NULL")
+  }
+
+  # Check if the data frame has enough studies 
+  if (nrow(current_df) < 2) { 
+    cat("Skipping brain region:", current_reg, "due to no data available.\n") 
+  } else { 
+    # Calculate VR effect size using escalc
+    escalc_vr_results <- escalc(measure = "VR", 
+                                 m1i=current_df$`metabolite mean (bilateral)_TRS`,
+                                 sd1i=current_df$`sd (bilateral)_TRS`,
+                                 n1i=current_df$`sample_size_TRS`,
+                                 m2i=current_df$`metabolite mean (bilateral)_HC`,
+                                 sd2i=current_df$`sd (bilateral)_HC`,
+                                 n2i=current_df$`sample_size_HC`)
+    current_df_vr <- cbind(current_df, escalc_vr_results)
+
+    # Meta-analyze VR
+    vr_result <- rma(yi, vi, data = current_df_vr, method = "REML", control = list(maxiter = 1000, stepadj = 0.5))
+
+    # Store overall VR results 
+    trs_vr_summary_results <- rbind(trs_vr_summary_results, data.frame(
+      brain_region = current_reg,
+      diagnosis = "TRS",
+      yi = vr_result$beta[1],  
+      ci.lb = vr_result$ci.lb[1],  
+      ci.ub = vr_result$ci.ub[1],  
+      stringsAsFactors = FALSE
+    ))
+
+    # Plot VR results
+    forest(vr_result, 
+           slab = current_df_vr$ID,
+           xlab = "Variation Ratio (VR)", 
+           main = paste("Forest Plot for Variability in Choline levels in", current_reg, "-", "TRS vs HC"))
+
+  } 
+}
+
+trs_vr_summary_results <- trs_vr_summary_results %>% distinct()
+
+# Print the summary of meta-analysis results for VR
+print(trs_vr_summary_results)
+
+
+```
+
+
+```{r}
+
+# Combine the SMD data frames into one
+all_dx_smd_results <- bind_rows(
+  chr_smd_summary_results,
+  fep_smd_summary_results,
+  up_smd_summary_results,
+  sz_smd_summary_results,
+  trs_smd_summary_results
+)
+
+# Update diagnosis names
+all_dx_smd_results <- all_dx_smd_results %>%
+  mutate(diagnosis = case_when(
+    diagnosis == "other_psychosis" ~ "Psychosis NOS",
+    TRUE ~ diagnosis
+  ))
+print(all_dx_smd_results)
+
+# Combine the CVR data frames into one
+all_dx_cvr_results <- bind_rows(
+  chr_cvr_summary_results,
+  fep_cvr_summary_results,
+  up_cvr_summary_results,
+  sz_cvr_summary_results,
+  trs_cvr_summary_results
+)
+
+# Update diagnosis names
+all_dx_cvr_results <- all_dx_cvr_results %>%
+  mutate(diagnosis = case_when(
+    diagnosis == "other_psychosis" ~ "Psychosis NOS",
+    TRUE ~ diagnosis
+  ))
+
+# Print the combined CVR results to check
+print(all_dx_cvr_results)
+
+# Write the combined SMD results to an Excel file
+write_xlsx(all_dx_smd_results, path = "all_dx_smd_results.xlsx")
+
+# Write the combined CVR results to an Excel file
+write_xlsx(all_dx_cvr_results, path = "all_dx_cvr_results.xlsx")
+
+```
+
+
+
